@@ -16,10 +16,30 @@ if not groq_api_key:
 
 client = Groq(api_key=groq_api_key)
 
-# 2. File Upload Sidebar
+# Dynamically fetch active Groq models to avoid decommission errors
+@st.cache_data(ttl=3600)
+def get_active_groq_models():
+    try:
+        model_list = client.models.list()
+        # Filter for text chat models and sort them
+        chat_models = [
+            m.id for m in model_list.data 
+            if not any(x in m.id.lower() for x in ["whisper", "vision", "guard", "embed"])
+        ]
+        return sorted(chat_models) if chat_models else ["llama-3.3-70b-versatile"]
+    except Exception:
+        return ["llama-3.3-70b-versatile"]
+
+active_models = get_active_groq_models()
+
+# 2. File Upload & Model Selector Sidebar
 with st.sidebar:
     st.header("Document Control")
     uploaded_file = st.file_uploader("Upload PDF Document", type=["pdf"])
+    
+    st.divider()
+    st.header("Model Settings")
+    selected_model = st.selectbox("Active Groq Model", options=active_models)
 
 def extract_pdf_pages(pdf_file):
     reader = PdfReader(pdf_file)
@@ -31,7 +51,6 @@ def extract_pdf_pages(pdf_file):
     return pages
 
 def find_relevant_pages(pages, query):
-    # Split query into keywords (ignoring small filler words)
     keywords = [word.lower() for word in re.findall(r"\w+", query) if len(word) > 2]
     if not keywords:
         return pages[:3]
@@ -69,9 +88,9 @@ Answer the user's question using ONLY the provided document excerpts.
 Document Excerpts:
 {document_context}"""
 
-        with st.spinner("Analyzing document..."):
+        with st.spinner(f"Analyzing document with {selected_model}..."):
             completion = client.chat.completions.create(
-                model="qwen-2.5-32b",
+                model=selected_model,
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt}
@@ -86,4 +105,4 @@ Document Excerpts:
                 for entry in matched_pages:
                     st.markdown(f"**Page {entry['page']} excerpt:**")
                     st.text(entry["text"][:600] + ("..." if len(entry["text"]) > 600 else ""))
-        
+                    
