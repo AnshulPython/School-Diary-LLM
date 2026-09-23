@@ -1,31 +1,13 @@
 import os
-import sys
-import subprocess
-
-# 1. THE AUTO-INSTALLER HACK
-# This intercepts the missing module error and forces the server to install 
-# the required packages on the fly before running the rest of the script.
-try:
-    from groq import Groq
-except ModuleNotFoundError:
-    subprocess.check_call([
-        sys.executable, "-m", "pip", "install", 
-        "groq", "langchain", "langchain-community", 
-        "langchain-text-splitters", "pypdf", "faiss-cpu", "sentence-transformers"
-    ])
-    from groq import Groq
-
-# 2. STANDARD IMPORTS
+import re
 import streamlit as st
-from langchain_community.document_loaders import PyPDFLoader
-from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_community.vectorstores import FAISS
-from langchain_community.embeddings import HuggingFaceEmbeddings
+from groq import Groq
+from pypdf import PdfReader
 
 st.set_page_config(page_title="School Policy Agent", layout="wide")
 st.title("🏫 School Handbook & Policy Agent")
 
-# 3. API KEY AUTHENTICATION
+# 1. API Key Auth
 groq_api_key = st.secrets.get("GROQ_API_KEY") or os.environ.get("GROQ_API_KEY")
 if not groq_api_key:
     st.error("Missing GROQ_API_KEY. Please add it in Streamlit Advanced Settings -> Secrets.")
@@ -33,54 +15,59 @@ if not groq_api_key:
 
 client = Groq(api_key=groq_api_key)
 
-# 4. LIGHTWEIGHT EMBEDDING MODEL
-@st.cache_resource
-def get_embedding_model():
-    return HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
-
-embedding_model = get_embedding_model()
-
-# 5. SIDEBAR: PDF INGESTION
+# 2. Sidebar Upload
 with st.sidebar:
     st.header("Admin Settings")
     uploaded_file = st.file_uploader("Upload School Handbook (PDF)", type=["pdf"])
 
-if uploaded_file and "vector_db" not in st.session_state:
-    with st.spinner("Processing PDF and indexing sections (this takes a few seconds)..."):
-        with open("uploaded_handbook.pdf", "wb") as f:
-            f.write(uploaded_file.get_buffer())
-        
-        loader = PyPDFLoader("uploaded_handbook.pdf")
-        documents = loader.load()
-        
-        splitter = RecursiveCharacterTextSplitter(chunk_size=700, chunk_overlap=100)
-        docs = splitter.split_documents(documents)
-        
-        st.session_state.vector_db = FAISS.from_documents(docs, embedding_model)
-        st.success(f"Handbook loaded successfully ({len(docs)} segments indexed)!")
+def extract_handbook_pages(pdf_file):
+    reader = PdfReader(pdf_file)
+    pages = []
+    for i, page in enumerate(reader.pages):
+        text = page.extract_text() or ""
+        if text.strip():
+            pages.append({"page": i + 1, "text": text})
+    return pages
 
-# 6. MAIN CHAT INTERFACE
+def score_pages(pages, query):
+    words = [w.lower() for w in re.findall(r'\w+', query) if len(w) > 2]
+    if not words:
+        return pages[:3]
+    
+    scored = []
+    for p in pages:
+        page_text = p["text"].lower()
+        score = sum(page_text.count(word) for word in words)
+        scored.append((score, p))
+    
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return [item[1] for item in scored[:3]]
+
+if uploaded_file and "handbook_pages" not in st.session_state:
+    with st.spinner("Reading and preparing handbook..."):
+        st.session_state.handbook_pages = extract_handbook_pages(uploaded_file)
+        st.success(f"Handbook loaded: {len(st.session_state.handbook_pages)} pages processed!")
+
+# 3. Chat Interface
 user_query = st.text_input("Ask a question about rules, schedules, or dress codes (in any language):")
 
 if user_query:
-    if "vector_db" not in st.session_state:
-        st.warning("Please upload a handbook PDF in the sidebar first.")
+    if "handbook_pages" not in st.session_state:
+        st.warning("Please upload a school handbook PDF in the sidebar first.")
     else:
-        # Retrieve the most relevant contextual chunks
-        retriever = st.session_state.vector_db.as_retriever(search_kwargs={"k": 3})
-        matches = retriever.invoke(user_query)
-        context = "\n---\n".join([doc.page_content for doc in matches])
+        relevant_pages = score_pages(st.session_state.handbook_pages, user_query)
+        context = "\n---\n".join([f"[Page {p['page']}]:\n{p['text']}" for p in relevant_pages])
 
         system_prompt = f"""You are an accurate, helpful school administrative assistant.
 Answer the user's question based strictly on the policy excerpt provided below.
 - Reply in the EXACT same language the user writes in.
-- Cite specific rules or page numbers when available.
+- Cite specific rules and page numbers when available.
 - If the excerpt does NOT contain the answer, reply strictly: "This information is not covered in the current school policy document." Do not invent rules.
 
 Policy Excerpt:
 {context}"""
 
-        with st.spinner("Analyzing policies..."):
+        with st.spinner("Finding answer..."):
             response = client.chat.completions.create(
                 model="llama-3.1-8b-instant",
                 messages=[
@@ -94,7 +81,7 @@ Policy Excerpt:
             st.write(response.choices[0].message.content)
 
             with st.expander("View Cited Excerpts"):
-                for i, doc in enumerate(matches, 1):
-                    st.markdown(f"**Source Section {i} (Page {doc.metadata.get('page', 'N/A')}):**")
-                    st.write(doc.page_content)
-                
+                for p in relevant_pages:
+                    st.markdown(f"**Page {p['page']}:**")
+                    st.text(p["text"][:600] + "...")
+                    
