@@ -71,7 +71,7 @@ Document Excerpts:
 
         with st.spinner("Analyzing document..."):
             completion = client.chat.completions.create(
-                model="llama-3.3-70b-versatile",
+                model="qwen-2.5-32b",
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt}
