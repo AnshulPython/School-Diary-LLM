@@ -67,7 +67,7 @@ def extract_pdf_pages(file_path_or_buffer):
 def find_relevant_pages(pages, query):
     keywords = [word.lower() for word in re.findall(r"\w+", query) if len(word) > 2]
     if not keywords:
-        return pages[:3]
+        return pages[:5]
     
     scored_pages = []
     for item in pages:
@@ -76,7 +76,13 @@ def find_relevant_pages(pages, query):
         scored_pages.append((score, item))
     
     scored_pages.sort(key=lambda entry: entry[0], reverse=True)
-    return [entry[1] for entry in scored_pages[:3]]
+    
+    # Take up to top 6 pages that actually contain the keywords
+    top_matches = [entry[1] for entry in scored_pages if entry[0] > 0][:6]
+    
+    # Fallback to the first few pages if no keywords matched
+    return top_matches if top_matches else pages[:3]
+    
 
 @st.cache_resource
 def load_persisted_document():
