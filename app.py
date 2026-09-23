@@ -89,7 +89,7 @@ with st.sidebar:
                 with st.spinner("Processing and saving document..."):
                     # Save permanently to container storage
                     with open("indexed_document.pdf", "wb") as f:
-                        f.write(uploaded_file.get_buffer())
+                        f.write(uploaded_file.getbuffer())
                     
                     # Clear the cache so all visitors immediately see the new file
                     st.cache_resource.clear()
