@@ -17,7 +17,21 @@ if not groq_api_key:
 
 client = Groq(api_key=groq_api_key)
 
-# Dynamically fetch ALL active text models currently available on your Groq account
+# Helpers to persist and load model choice from disk
+MODEL_FILE = "selected_model.txt"
+PREFERRED_DEFAULT = "openai/gpt-oss-20b"
+
+def get_saved_model():
+    if os.path.exists(MODEL_FILE):
+        with open(MODEL_FILE, "r") as f:
+            return f.read().strip()
+    return PREFERRED_DEFAULT
+
+def save_model_choice(model_name):
+    with open(MODEL_FILE, "w") as f:
+        f.write(model_name)
+
+# Dynamically fetch ALL active text chat models on Groq without excluding any families
 @st.cache_data(ttl=3600)
 def get_active_groq_models():
     try:
@@ -26,15 +40,20 @@ def get_active_groq_models():
             m.id for m in model_list.data 
             if not any(x in m.id.lower() for x in ["whisper", "vision", "guard", "embed"])
         ]
-        return sorted(chat_models) if chat_models else ["llama-3.3-70b-versatile"]
+        return sorted(chat_models) if chat_models else [PREFERRED_DEFAULT]
     except Exception:
-        return ["llama-3.3-70b-versatile"]
+        return [PREFERRED_DEFAULT]
 
 active_models = get_active_groq_models()
 
-# Initialize session state defaults
+# Ensure preferred model is in list; default gracefully if not
+saved_model = get_saved_model()
+default_model = saved_model if saved_model in active_models else (
+    PREFERRED_DEFAULT if PREFERRED_DEFAULT in active_models else active_models[0]
+)
+
 if "current_model" not in st.session_state:
-    st.session_state.current_model = active_models[0]
+    st.session_state.current_model = default_model
 
 def extract_pdf_pages(file_path_or_buffer):
     reader = PdfReader(file_path_or_buffer)
@@ -59,14 +78,11 @@ def find_relevant_pages(pages, query):
     scored_pages.sort(key=lambda entry: entry[0], reverse=True)
     return [entry[1] for entry in scored_pages[:3]]
 
-# Automatically load the persisted document if one exists on disk
 @st.cache_resource
 def load_persisted_document():
     if os.path.exists("indexed_document.pdf"):
         return extract_pdf_pages("indexed_document.pdf")
     return []
-
-document_pages = load_persisted_document()
 
 # 2. Sidebar: Admin Controls Only
 with st.sidebar:
@@ -76,22 +92,27 @@ with st.sidebar:
     if entered_password == admin_password:
         st.success("Admin unlocked")
         
-        # Dynamic model selection from all live models
-        st.session_state.current_model = st.selectbox(
+        # Display full list of models
+        current_index = active_models.index(st.session_state.current_model) if st.session_state.current_model in active_models else 0
+        new_model_choice = st.selectbox(
             "Select Active Groq Model",
             options=active_models,
-            index=active_models.index(st.session_state.current_model) if st.session_state.current_model in active_models else 0
+            index=current_index
         )
+        
+        # Save choice to disk whenever updated
+        if new_model_choice != st.session_state.current_model:
+            st.session_state.current_model = new_model_choice
+            save_model_choice(new_model_choice)
+            st.toast(f"Model updated to {new_model_choice}!")
 
         uploaded_file = st.file_uploader("Upload / Replace PDF Document", type=["pdf"])
         if uploaded_file:
             if st.button("Index and Save for All Users"):
                 with st.spinner("Processing and saving document..."):
-                    # Save permanently to container storage
                     with open("indexed_document.pdf", "wb") as f:
                         f.write(uploaded_file.getbuffer())
                     
-                    # Clear the cache so all visitors immediately see the new file
                     st.cache_resource.clear()
                     st.rerun()
     elif entered_password:
@@ -103,7 +124,6 @@ with st.sidebar:
 user_prompt = st.text_input("Ask any question regarding the document (supports any language):")
 
 if user_prompt:
-    # Refresh in-memory document state
     active_doc = load_persisted_document()
     
     if not active_doc:
@@ -138,4 +158,4 @@ Document Excerpts:
                 for entry in matched_pages:
                     st.markdown(f"**Page {entry['page']} excerpt:**")
                     st.text(entry["text"][:600] + ("..." if len(entry["text"]) > 600 else ""))
-                    
+    
