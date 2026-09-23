@@ -4,42 +4,24 @@ import streamlit as st
 from groq import Groq
 from pypdf import PdfReader
 
-# Page setup
 st.set_page_config(page_title="Document-Reader-LLM", layout="wide")
 st.title("📄 Document-Reader-LLM")
 
-# 1. Groq Authentication
+# 1. API Key & Admin Auth
 groq_api_key = st.secrets.get("GROQ_API_KEY") or os.environ.get("GROQ_API_KEY")
+admin_password = st.secrets.get("ADMIN_PASSWORD", "admin123")
+
 if not groq_api_key:
     st.error("Missing GROQ_API_KEY. Add it in Streamlit Cloud -> Settings -> Secrets.")
     st.stop()
 
 client = Groq(api_key=groq_api_key)
 
-# Dynamically fetch active Groq models to avoid decommission errors
-@st.cache_data(ttl=3600)
-def get_active_groq_models():
-    try:
-        model_list = client.models.list()
-        # Filter for text chat models and sort them
-        chat_models = [
-            m.id for m in model_list.data 
-            if not any(x in m.id.lower() for x in ["whisper", "vision", "guard", "embed"])
-        ]
-        return sorted(chat_models) if chat_models else ["llama-3.3-70b-versatile"]
-    except Exception:
-        return ["llama-3.3-70b-versatile"]
-
-active_models = get_active_groq_models()
-
-# 2. File Upload & Model Selector Sidebar
-with st.sidebar:
-    st.header("Document Control")
-    uploaded_file = st.file_uploader("Upload PDF Document", type=["pdf"])
-    
-    st.divider()
-    st.header("Model Settings")
-    selected_model = st.selectbox("Active Groq Model", options=active_models)
+# Persistent global storage for the document and default model
+if "current_model" not in st.session_state:
+    st.session_state.current_model = "llama-3.3-70b-versatile"
+if "document_pages" not in st.session_state:
+    st.session_state.document_pages = []
 
 def extract_pdf_pages(pdf_file):
     reader = PdfReader(pdf_file)
@@ -64,17 +46,40 @@ def find_relevant_pages(pages, query):
     scored_pages.sort(key=lambda entry: entry[0], reverse=True)
     return [entry[1] for entry in scored_pages[:3]]
 
-if uploaded_file and "document_pages" not in st.session_state:
-    with st.spinner("Parsing document..."):
-        st.session_state.document_pages = extract_pdf_pages(uploaded_file)
-        st.success(f"Document ingested: {len(st.session_state.document_pages)} pages processed!")
+# 2. Sidebar: Hidden Behind Admin Login
+with st.sidebar:
+    st.header("Admin Controls")
+    entered_password = st.text_input("Enter Admin Password", type="password")
 
-# 3. Query & Interaction
-user_prompt = st.text_input("Ask any question regarding the uploaded document (supports any language):")
+    if entered_password == admin_password:
+        st.success("Admin mode unlocked")
+        
+        # Admin can switch the active model
+        model_choice = st.selectbox(
+            "Select Model",
+            options=["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "mixtral-8x7b-32768"],
+            index=0
+        )
+        st.session_state.current_model = model_choice
+
+        # Admin can upload or replace the PDF
+        uploaded_file = st.file_uploader("Upload / Replace PDF", type=["pdf"])
+        if uploaded_file:
+            if st.button("Index and Save Document"):
+                with st.spinner("Extracting and saving document..."):
+                    st.session_state.document_pages = extract_pdf_pages(uploaded_file)
+                    st.success(f"Indexed {len(st.session_state.document_pages)} pages!")
+    elif entered_password:
+        st.error("Incorrect password.")
+    else:
+        st.info("Log in with the admin password to upload documents or change the model.")
+
+# 3. Public User Search Interface
+user_prompt = st.text_input("Ask a question about the document (in any language):")
 
 if user_prompt:
-    if "document_pages" not in st.session_state:
-        st.warning("Please upload a PDF document in the sidebar first.")
+    if not st.session_state.document_pages:
+        st.warning("No document has been uploaded or indexed yet. Please check back later.")
     else:
         matched_pages = find_relevant_pages(st.session_state.document_pages, user_prompt)
         document_context = "\n---\n".join([f"[Page {p['page']}]:\n{p['text']}" for p in matched_pages])
@@ -88,9 +93,9 @@ Answer the user's question using ONLY the provided document excerpts.
 Document Excerpts:
 {document_context}"""
 
-        with st.spinner(f"Analyzing document with {selected_model}..."):
+        with st.spinner("Searching document..."):
             completion = client.chat.completions.create(
-                model=selected_model,
+                model=st.session_state.current_model,
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt}
